@@ -1,0 +1,62 @@
+VERSION ""
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: ECU_A ECU_B
+
+BO_ 100 EngineStatus: 4 ECU_A
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Vector__XXX
+ SG_ EngineTemp : 16|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+
+BO_ 200 MuxMessage: 4 ECU_A
+ SG_ Selector M : 0|4@1+ (1,0) [0|15] "" Vector__XXX
+ SG_ CommonSig : 4|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ BranchA m1 : 16|8@1+ (2,0) [0|510] "" Vector__XXX
+ SG_ BranchB m2 : 24|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 300 ShortMessage: 3 ECU_A
+ SG_ FirstByte : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ SecondByte : 8|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ ThirdByte : 16|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 400 EventMessage: 2 ECU_B
+ SG_ EventCounter : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ EventState : 8|4@1+ (1,0) [0|15] "" Vector__XXX
+
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 1000000;
+BA_DEF_DEF_  "GenMsgCycleTime" 0;
+BA_ "GenMsgCycleTime" BO_ 100 100;
+BA_ "GenMsgCycleTime" BO_ 200 200;
+BA_ "GenMsgCycleTime" BO_ 300 500;
+
+VAL_ 200 Selector 1 "BranchA" 2 "BranchB" ;
+VAL_ 400 EventState 0 "Idle" 1 "Active" 15 "Error" ;

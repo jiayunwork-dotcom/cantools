@@ -62,6 +62,41 @@ Functions and classes
 
       Message signals.
 
+Quality-aware signal time series
+================================
+
+The :mod:`cantools.quality` package turns a forward-only, absolute-time
+``candump -L`` log into a fixed-grid signal view where every point carries
+a quality. A held value is distinguished from a fresh observation, an
+expired value, a raw invalid code, an inactive multiplexer branch, a
+truncated bit field and a frame-level decode failure. The log is read
+exactly once and resident memory is bounded by the selected signals, the
+bounded arrival-history and the current output batch.
+
+.. autoclass:: cantools.quality.SignalQuality
+    :members:
+
+.. autoclass:: cantools.quality.QualityTimeSeries
+    :members:
+
+.. autoclass:: cantools.quality.SignalSelector
+    :members:
+
+.. autoclass:: cantools.quality.StalenessPolicy
+    :members:
+
+.. autoclass:: cantools.quality.QualityPoint
+    :members:
+
+.. autoclass:: cantools.quality.QualityDecodeResult
+    :members:
+
+.. autofunction:: cantools.quality.build_series_from_file
+
+.. autofunction:: cantools.quality.write_long_csv
+
+.. autofunction:: cantools.quality.write_wide_csv
+
 Coding style
 ============
 

@@ -551,6 +551,7 @@ class Database:
                        decode_containers: bool = False,
                        allow_truncated:  bool = False,
                        force_extended_id: bool = False,
+                       with_quality: bool = False,
                        ) \
         -> DecodeResultType:
 
@@ -575,6 +576,11 @@ class Database:
         expect this to misbehave. Trying to decode a container message
         with `decode_containers` set to ``False`` will raise a
         `DecodeError`.
+
+        If `with_quality` is ``True`` a
+        :class:`cantools.quality.QualityDecodeResult` with per-signal
+        statuses is returned instead of the plain dictionary; the
+        default behavior is unchanged.
         """
 
         if isinstance(frame_id_or_name, int):
@@ -592,7 +598,8 @@ class Database:
                                       decode_choices,
                                       scaling,
                                       decode_containers=True,
-                                      allow_truncated=allow_truncated)
+                                      allow_truncated=allow_truncated,
+                                      with_quality=with_quality)
             else:
                 raise DecodeError(f'Message "{message.name}" is a container '
                                   f'message, but decoding such messages has '
@@ -601,7 +608,8 @@ class Database:
         return message.decode(data,
                               decode_choices,
                               scaling,
-                              allow_truncated=allow_truncated)
+                              allow_truncated=allow_truncated,
+                              with_quality=with_quality)
 
     def refresh(self) -> None:
         """Refresh the internal database state.

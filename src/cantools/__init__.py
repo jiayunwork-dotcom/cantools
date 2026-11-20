@@ -1,4 +1,4 @@
-__all__ = ["Error", "__author__", "__version__", "database", "j1939", "logreader", "tester"]
+__all__ = ["Error", "__author__", "__version__", "database", "j1939", "logreader", "quality", "tester"]
 
 import argparse
 import importlib
@@ -10,9 +10,8 @@ import types
 import warnings
 from importlib.metadata import PackageNotFoundError, version
 
-from . import database, j1939, logreader, tester
+from . import database, j1939, logreader, quality, tester
 from .errors import Error
-
 __author__ = 'Erik Moqvist'
 
 try:

@@ -1061,6 +1061,7 @@ class Message:
                decode_containers: bool = False,
                allow_truncated: bool = False,
                allow_excess: bool = True,
+               with_quality: bool = False,
                ) \
                -> DecodeResultType:
         """Decode given data as a message of this type.
@@ -1094,7 +1095,26 @@ class Message:
         If `allow_excess` is ``True``, data that is are longer than
         the expected message length is decoded, else a `ValueError` is
         raised if such data is encountered.
+
+        If `with_quality` is ``True`` a
+        :class:`cantools.quality.QualityDecodeResult` is returned instead
+        of the plain signal dictionary. It carries the same values for
+        usable signals plus a per-signal
+        :class:`cantools.quality.SignalStatus` distinguishing fresh,
+        invalid (``raw_invalid``), truncated, inactive multiplexer
+        branch and frame-level decode failures. The default (``False``)
+        preserves the historical return value exactly.
         """
+
+        if with_quality:
+            from ...quality.decoding import decode_message_quality
+            return decode_message_quality(
+                self,
+                data,
+                decode_choices=decode_choices,
+                scaling=scaling,
+                decode_containers=decode_containers,
+            )
 
         if decode_containers and self.is_container:
             return self.decode_container(data,

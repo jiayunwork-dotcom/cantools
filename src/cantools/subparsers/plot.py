@@ -68,6 +68,19 @@ from ..database.namedsignalvalue import NamedSignalValue
 
 PYPLOT_BASE_COLORS = "bgrcmykwC"
 
+# Quality colors used by the optional --quality mode. Kept separate from
+# the legacy error-marker colors so the two can coexist.
+QUALITY_COLORS = {
+    "fresh": "#1f77b4",
+    "held": "#7fb3d5",
+    "expired": "#d62728",
+    "invalid": "#9467bd",
+    "branch_inactive": "#ff7f0e",
+    "decode_failed": "#8c564b",
+    "truncated": "#17becf",
+    "unseen": "#bbbbbb",
+}
+
 
 class MatplotlibNotInstalledError(errors.Error):
 
@@ -345,6 +358,11 @@ def _do_decode(args):
 
     if args.style is not None:
         plt.style.use(args.style)
+
+    if getattr(args, "quality", False):
+        from ..quality.plot_integration import run_quality_plot
+        run_quality_plot(dbase, sys.stdin, args)
+        return
 
     plotter = Plotter(dbase, args)
 
@@ -918,6 +936,51 @@ def add_subparser(subparsers):
         '--no-strict',
         action='store_true',
         help='Skip database consistency checks.')
+
+    plot_parser.add_argument(
+        '--quality',
+        action='store_true',
+        help=('Enable quality-aware plotting. The candump -L log is '
+              'resampled on a fixed microsecond grid and every point is '
+              'classified (fresh/held/expired/invalid/branch_inactive/'
+              'decode_failed/truncated/unseen). Curves stop at the '
+              'staleness limit and are never connected across '
+              'unavailable intervals. Requires --grid-start, --grid-stop '
+              'and --grid-step. Disables the legacy frame-by-frame '
+              'plotting path.'))
+    plot_parser.add_argument(
+        '--grid-start',
+        type=float,
+        help='Quality mode: grid start in absolute epoch seconds.')
+    plot_parser.add_argument(
+        '--grid-stop',
+        type=float,
+        help='Quality mode: grid stop in absolute epoch seconds.')
+    plot_parser.add_argument(
+        '--grid-step',
+        type=float,
+        help='Quality mode: grid step in seconds (must be positive).')
+    plot_parser.add_argument(
+        '--staleness',
+        action='append',
+        default=[],
+        metavar='MESSAGE.SIGNAL=SECONDS',
+        help=('Quality mode: explicit staleness limit for one signal, '
+              'e.g. EngineStatus.EngineSpeed=0.25. May be given multiple '
+              'times; finite positive values only and overrides automatic '
+              'estimation.'))
+    plot_parser.add_argument(
+        '--channel',
+        action='append',
+        default=[],
+        help=('Quality mode: restrict input to these channel names. May be '
+              'repeated. Defaults to all channels, keeping same-id frames '
+              'on different channels as separate curves.'))
+    plot_parser.add_argument(
+        '--csv',
+        dest='quality_csv',
+        help=('Quality mode: also write the long-format quality detail to '
+              'this CSV path (streamed, not buffered in memory).'))
 
     plot_parser.add_argument(
         'database',
