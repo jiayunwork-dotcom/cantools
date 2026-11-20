@@ -88,7 +88,9 @@ class Listener(can.Listener):
             return
 
         try:
-            database_message = self._database.get_message_by_frame_id(msg.arbitration_id, msg.is_extended_id)
+            database_message = self._database.get_message_by_frame_id(
+                msg.arbitration_id,
+                is_extended_frame=bool(msg.is_extended_id))
         except KeyError:
             return
 

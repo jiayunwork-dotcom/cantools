@@ -9,6 +9,7 @@ from typing import Optional, Union
 
 from ..database.can.database import Database
 from ..database.can.message import Message
+from ..database.errors import AmbiguousFrameIdError
 from ..database.namedsignalvalue import NamedSignalValue
 from ..logreader import DataFrame
 from .decoder import decode_frame_with_quality
@@ -243,23 +244,46 @@ class QualityTimeSeries:
     # ------- setup helpers -------
 
     def _lookup_message(self, selection: Selection):
+        """Resolve the selection's frame identity to its message.
+
+        Ambiguous identities are rejected: the per-frame lookup below is
+        keyed by exactly this identity, so accepting one of several
+        incompatible definitions would silently pick a signal layout.
+        """
         try:
-            message = self._db.get_message_by_frame_id(
+            resolved = self._db.get_message_by_frame_id(
                 selection.frame_id,
-                force_extended_id=selection.is_extended_frame,
+                is_extended_frame=selection.is_extended_frame,
             )
+        except AmbiguousFrameIdError as e:
+            raise ValueError(
+                f"cannot select a message for frame id "
+                f"0x{selection.frame_id:X} "
+                f"({'extended' if selection.is_extended_frame else 'standard'}): "
+                f"{e}"
+            ) from None
         except KeyError:
             raise ValueError(
                 f"no message in database for frame id "
                 f"0x{selection.frame_id:X} "
                 f"({'extended' if selection.is_extended_frame else 'standard'})"
             ) from None
-        if message.name != selection.message_name:
-            raise ValueError(
-                f"frame id 0x{selection.frame_id:X} resolves to message "
-                f"{message.name!r}, not {selection.message_name!r}"
-            )
-        return message
+
+        if resolved.name != selection.message_name:
+            # Several definitions may share a masked identity when their
+            # layouts are provably identical. Decoding is the same for
+            # either; keep the name the user selected so its signal keys
+            # and curve labels stay stable.
+            selected = self._db.get_message_by_name(selection.message_name)
+            if (Database._message_layout_signature(selected)
+                    != Database._message_layout_signature(resolved)):
+                raise ValueError(
+                    f"frame id 0x{selection.frame_id:X} resolves to message "
+                    f"{resolved.name!r}, not {selection.message_name!r}"
+                )
+            return selected
+
+        return resolved
 
     # ------- iteration -------
 
@@ -396,8 +420,20 @@ class QualityTimeSeries:
             try:
                 self._db.get_message_by_frame_id(
                     frame.frame_id,
-                    force_extended_id=frame.is_extended_frame,
+                    is_extended_frame=frame.is_extended_frame,
                 )
+            except AmbiguousFrameIdError as e:
+                self.diagnostics.append(Diagnostic(
+                    line=frame_log.line,
+                    kind=DiagnosticKind.UNKNOWN_MESSAGE,
+                    timestamp_us=frame_log.timestamp_us,
+                    message=(
+                        f"ambiguous message for frame id "
+                        f"0x{frame.frame_id:X} on channel "
+                        f"{frame.channel!r}: {e}"
+                    ),
+                    raw_line=frame_log.raw_line,
+                ))
             except KeyError:
                 self.diagnostics.append(Diagnostic(
                     line=frame_log.line,

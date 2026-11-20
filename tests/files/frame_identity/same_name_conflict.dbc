@@ -1,0 +1,13 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU
+
+BO_ 2566848769 SharedName: 8 ECU
+ SG_ V : 0|8@1+ (1,0) [0|255] "" ECU
+
+BO_ 2566848770 SharedName: 8 ECU
+ SG_ V : 8|8@1+ (1,0) [0|255] "" ECU

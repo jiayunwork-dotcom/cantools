@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..database.can.database import Database
+from ..database.errors import AmbiguousFrameIdError
 from .engine import Selection
 
 
@@ -41,6 +42,25 @@ class SignalSelector:
                 f"{'extended' if extended else 'standard'} but the selector "
                 f"requested {self.is_extended_frame}"
             )
+
+        # Resolving the name is not enough: the frame identity used for
+        # lookups must be unambiguous too, otherwise the per-frame lookup
+        # in the engine would silently disagree with this selection.
+        try:
+            database.get_message_by_frame_id(
+                message.frame_id,
+                is_extended_frame=extended)
+        except AmbiguousFrameIdError as e:
+            raise ValueError(
+                f"message {self.message_name!r} cannot be selected: {e}"
+            ) from None
+        except KeyError:
+            raise ValueError(
+                f"message {self.message_name!r} has frame id "
+                f"0x{message.frame_id:X} "
+                f"({'extended' if extended else 'standard'}) which is not "
+                "indexed by the database's frame id mask"
+            ) from None
 
         message.get_signal_by_name(self.signal_name)
 

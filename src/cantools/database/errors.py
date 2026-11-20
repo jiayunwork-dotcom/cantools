@@ -19,6 +19,46 @@ class DecodeError(Error):
     pass
 
 
+class AmbiguousFrameIdError(Error, KeyError):
+    """Raised when one masked frame identity matches several messages.
+
+    It deliberately derives from :class:`KeyError` as well, so callers
+    that treat a missing frame id as "unknown" keep working; the
+    distinction is that this frame id is *ambiguous*, not unknown.
+    """
+
+    def __init__(self,
+                 frame_key: int,
+                 frame_id_mask: int,
+                 is_extended_frame: bool,
+                 messages: tuple[Any, ...],
+                 requested_frame_id: Optional[int] = None) -> None:
+        self.frame_key = frame_key
+        self.frame_id_mask = frame_id_mask
+        self.is_extended_frame = is_extended_frame
+        self.messages = messages
+        self.requested_frame_id = (
+            frame_key if requested_frame_id is None else requested_frame_id)
+        super().__init__(frame_key)
+
+    def __str__(self) -> str:
+        kind = 'extended' if self.is_extended_frame else 'standard'
+        candidates = ', '.join(
+            f"'{message.name}' (0x{message.frame_id:x}, "
+            f"{'extended' if message.is_extended_frame else 'standard'})"
+            for message in self.messages)
+        return (
+            f"ambiguous {kind} frame id 0x{self.requested_frame_id:x} with "
+            f"mask 0x{self.frame_id_mask:x}: it matches {len(self.messages)} "
+            f"different message definitions: {candidates}")
+
+    def __reduce__(self) -> Union[str, tuple[Any, ...]]:
+        return (type(self),
+                (self.frame_key, self.frame_id_mask,
+                 self.is_extended_frame, self.messages,
+                 self.requested_frame_id))
+
+
 class UnsupportedDatabaseFormatError(Error):
     """This exception is raised when
     :func:`~cantools.database.load_file()`,

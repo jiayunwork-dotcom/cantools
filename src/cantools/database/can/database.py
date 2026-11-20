@@ -8,7 +8,7 @@ from typing import (
 )
 
 from ...typechecking import DecodeResultType, EncodeInputType, StringPathLike
-from ..errors import DecodeError
+from ..errors import AmbiguousFrameIdError, DecodeError
 from ..utils import (
     SORT_SIGNALS_DEFAULT,
     sort_signals_by_start_bit,
@@ -20,11 +20,21 @@ from .bus import Bus
 from .formats import arxml, dbc, kcd, sym
 from .formats.arxml import AutosarDatabaseSpecifics
 from .formats.dbc import DbcSpecifics
+from .frame_identity import (
+    FrameIdentity,
+    frame_id_is_legal,
+    mask_frame_id,
+    normalize_frame_id_mask,
+    resolve_frame_identity,
+)
 from .internal_database import InternalDatabase
 from .message import Message
 from .node import Node
 
 LOGGER = logging.getLogger(__name__)
+
+#: Sentinel distinguishing "not provided by this format" from a value.
+_UNSET = object()
 
 
 class Database:
@@ -43,6 +53,30 @@ class Database:
     If you don't want them to be sorted pass `sort_signals = None`.
     If you want the signals to be sorted in another way pass something like
     `sort_signals = lambda signals: list(sorted(signals, key=lambda sig: sig.name))`
+
+    Frame identity
+    --------------
+    A frame is identified by ``(arbitration_id, is_extended_frame)``; the
+    standard/extended flag is never folded into the numeric id. The
+    ``frame_id_mask`` only selects arbitration id bits, so frames of
+    different type never collide even when their ids and masks match.
+
+    Conflict policy
+    ---------------
+    Messages whose masked frame identity is identical are not resolved by
+    load order. At :meth:`refresh` time the definitions are compared by a
+    full layout signature (length, frame type, every signal and its
+    conversion/multiplexing, container header ids). Definitions with an
+    identical signature are provably the same decoding layout and may
+    share the identity; any other collision is retained as a candidate
+    list and every lookup of that identity raises
+    :class:`~cantools.database.errors.AmbiguousFrameIdError` naming the
+    involved messages, their frame type and the mask. Identical message
+    *names* alone are not treated as proof of equivalence.
+
+    Lookup by name is unaffected by this: it stays a single mapping (the
+    last definition with a given name wins), since a name carries no
+    frame identity.
     """
 
     def __init__(self,
@@ -59,16 +93,24 @@ class Database:
         self._messages = messages or []
         self._nodes = nodes or []
         self._buses = buses or []
+        # Name lookup is a plain mapping: two messages may legitimately
+        # share a name, but a name never carries frame identity, so the
+        # last definition wins there (unchanged legacy behaviour).
         self._name_to_message: dict[str, Message] = {}
-        self._frame_id_to_message: dict[int, Message] = {}
+        # One entry per *frame identity*: the masked arbitration id and
+        # the standard/extended flag. Only identities resolving to
+        # exactly one definition are stored here.
+        self._frame_id_to_message: dict[FrameIdentity, Message] = {}
+        # Identity -> candidate definitions when a partial mask makes
+        # several incompatible definitions indistinguishable at lookup
+        # time. Rebuilt on every refresh, so it never accumulates stale
+        # conflict records.
+        self._ambiguous_frame_ids: dict[FrameIdentity, tuple[Message, ...]] = {}
         self._version = version
         self._dbc = dbc_specifics
         self._autosar = autosar_specifics
 
-        if frame_id_mask is None:
-            frame_id_mask = 0xffffffff
-
-        self._frame_id_mask = frame_id_mask
+        self._frame_id_mask = normalize_frame_id_mask(frame_id_mask)
         self._strict = strict
         self._sort_signals = sort_signals
         self.refresh()
@@ -250,6 +292,44 @@ class Database:
         with open(filename, encoding=encoding, errors='replace') as fin:
             self.add_arxml(fin)
 
+    def _extend(self,
+                messages: list[Message],
+                nodes: Optional[list[Node]] = None,
+                buses: Optional[list[Bus]] = None,
+                version: Any = _UNSET,
+                dbc_specifics: Any = _UNSET,
+                autosar_specifics: Any = _UNSET,
+                ) -> None:
+        """Append parsed messages and rebuild the index atomically.
+
+        Only the attributes the format provides are replaced (a file may
+        legitimately have no version, so ``None`` is a real value and is
+        passed explicitly). If :meth:`refresh` fails, every attribute is
+        restored, so a subsequent call cannot observe a message list that
+        disagrees with the lookup tables.
+        """
+
+        saved = (self._messages, self._nodes, self._buses, self._version,
+                 self._dbc, self._autosar)
+        self._messages = self._messages + list(messages)
+        if nodes is not None:
+            self._nodes = nodes
+        if buses is not None:
+            self._buses = buses
+        if version is not _UNSET:
+            self._version = version
+        if dbc_specifics is not _UNSET:
+            self._dbc = dbc_specifics
+        if autosar_specifics is not _UNSET:
+            self._autosar = autosar_specifics
+
+        try:
+            self.refresh()
+        except Exception:
+            (self._messages, self._nodes, self._buses, self._version,
+             self._dbc, self._autosar) = saved
+            raise
+
     def add_arxml_string(self, string: str) -> None:
         """Parse given ARXML data string and add the parsed data to the
         database.
@@ -258,13 +338,12 @@ class Database:
 
         database = arxml.load_string(string, self._strict, sort_signals=self._sort_signals)
 
-        self._messages += database.messages
-        self._nodes = database.nodes
-        self._buses = database.buses
-        self._version = database.version
-        self._dbc = database.dbc
-        self._autosar = database.autosar
-        self.refresh()
+        self._extend(database.messages,
+                     nodes=database.nodes,
+                     buses=database.buses,
+                     version=database.version,
+                     dbc_specifics=database.dbc,
+                     autosar_specifics=database.autosar)
 
     def add_dbc(self, fp: TextIO) -> None:
         """Read and parse DBC data from given file-like object and add the
@@ -306,12 +385,11 @@ class Database:
 
         database = dbc.load_string(string, self._strict, sort_signals=self._sort_signals)
 
-        self._messages += database.messages
-        self._nodes = database.nodes
-        self._buses = database.buses
-        self._version = database.version
-        self._dbc = database.dbc
-        self.refresh()
+        self._extend(database.messages,
+                     nodes=database.nodes,
+                     buses=database.buses,
+                     version=database.version,
+                     dbc_specifics=database.dbc)
 
     def add_kcd(self, fp: TextIO) -> None:
         """Read and parse KCD data from given file-like object and add the
@@ -342,12 +420,11 @@ class Database:
 
         database = kcd.load_string(string, self._strict, sort_signals=self._sort_signals)
 
-        self._messages += database.messages
-        self._nodes = database.nodes
-        self._buses = database.buses
-        self._version = database.version
-        self._dbc = database.dbc
-        self.refresh()
+        self._extend(database.messages,
+                     nodes=database.nodes,
+                     buses=database.buses,
+                     version=database.version,
+                     dbc_specifics=database.dbc)
 
     def add_sym(self, fp: TextIO) -> None:
         """Read and parse SYM data from given file-like object and add the
@@ -378,38 +455,126 @@ class Database:
 
         database = sym.load_string(string, self._strict, sort_signals=self._sort_signals)
 
-        self._messages += database.messages
-        self._nodes = database.nodes
-        self._buses = database.buses
-        self._version = database.version
-        self._dbc = database.dbc
-        self.refresh()
+        self._extend(database.messages,
+                     nodes=database.nodes,
+                     buses=database.buses,
+                     version=database.version,
+                     dbc_specifics=database.dbc)
 
-    def _add_message(self, message: Message) -> None:
-        """Add given message to the database.
+    def frame_identity_of(self, message: Message) -> FrameIdentity:
+        """The internal ``(masked arbitration id, is_extended_frame)``
+        identity of ``message``.
 
         """
 
-        if message.name in self._name_to_message:
-            LOGGER.warning("Overwriting message '%s' with '%s' in the "
-                           "name to message dictionary.",
-                           self._name_to_message[message.name].name,
-                           message.name)
+        return (mask_frame_id(message.frame_id, self._frame_id_mask),
+                bool(message.is_extended_frame))
 
-        masked_frame_id = (message.frame_id & self._frame_id_mask)
-        if message.is_extended_frame:
-            masked_frame_id |= 0x80000000
+    @classmethod
+    def _message_layout_signature(cls, message: Message) -> tuple:
+        """A complete, comparable description of a message *layout*.
 
-        if masked_frame_id in self._frame_id_to_message:
-            LOGGER.warning(
-                "Overwriting message '%s' with '%s' in the frame id to message "
-                "dictionary because they have identical masked frame ids 0x%x.",
-                self._frame_id_to_message[masked_frame_id].name,
-                message.name,
-                masked_frame_id)
+        Two messages with an identical signature decode and encode a
+        frame of the same identity into exactly the same values, so they
+        can safely share that identity. The message name is deliberately
+        excluded: a name is not layout, and legacy behaviour lets the
+        last definition with a given name win. Everything that changes a
+        decoded value -- length, frame type, protocol, every signal's
+        position, conversion and multiplexing, and the layout of any
+        contained messages -- is included, so two layouts with the same
+        signal *names* but different scaling are not confused.
+        """
 
-        self._name_to_message[message.name] = message
-        self._frame_id_to_message[masked_frame_id] = message
+        return cls._layout_signature(message, set())
+
+    @classmethod
+    def _layout_signature(cls, message: Message, visiting: set[int]) -> tuple:
+        if id(message) in visiting:
+            # Malformed cyclic container reference; fall back to its
+            # identity only to terminate.
+            return ('cycle', message.header_id)
+
+        visiting = visiting | {id(message)}
+
+        signals = tuple(
+            (signal.name,
+             signal.start,
+             signal.length,
+             signal.byte_order,
+             signal.is_signed,
+             signal.is_float,
+             signal.scale,
+             signal.offset,
+             signal.minimum,
+             signal.maximum,
+             signal.raw_invalid,
+             signal.unit,
+             tuple(sorted(
+                 (int(raw), str(named))
+                 for raw, named in (signal.choices or {}).items())),
+             signal.is_multiplexer,
+             tuple(signal.multiplexer_ids or ()),
+             signal.multiplexer_signal)
+            for signal in message.signals)
+
+        contained = None
+        if message.contained_messages is not None:
+            contained = tuple(sorted(
+                ((contained_message.name,
+                  contained_message.header_id,
+                  cls._layout_signature(contained_message, visiting))
+                 for contained_message in message.contained_messages),
+                key=lambda item: (item[1] if item[1] is not None else 0,
+                                  item[0])))
+
+        return (message.length,
+                bool(message.is_extended_frame),
+                bool(message.is_fd),
+                message.protocol,
+                message.header_id,
+                message.header_byte_order,
+                message.contained_messages is not None,
+                contained,
+                signals)
+
+    def _resolve_frame_identity(self,
+                                frame_identity: FrameIdentity,
+                                requested_frame_id: Optional[int] = None) -> Message:
+        """Return the unique message for ``frame_identity``.
+
+        The lookup is a single dictionary probe in the normal case; only
+        a colliding identity needs the conflict list. Raises
+        :class:`KeyError` when no message matches and
+        :class:`AmbiguousFrameIdError` when several definitions share the
+        identity without being provably interchangeable.
+        """
+
+        message = self._frame_id_to_message.get(frame_identity)
+        if message is not None:
+            return message
+
+        candidates = self._ambiguous_frame_ids.get(frame_identity)
+        if candidates is None:
+            raise KeyError(self._legacy_frame_key(frame_identity))
+
+        raise AmbiguousFrameIdError(
+            self._legacy_frame_key(frame_identity),
+            self._frame_id_mask,
+            frame_identity[1],
+            candidates,
+            requested_frame_id)
+
+    def _legacy_frame_key(self, frame_identity: FrameIdentity) -> int:
+        """The numeric key historically used in ``KeyError`` messages.
+
+        It keeps the pre-existing ``0x80000000`` flag for extended ids
+        so old callers comparing ``exception.args[0]`` still match.
+        """
+
+        frame_id, is_extended_frame = frame_identity
+        if is_extended_frame:
+            return frame_id | 0x80000000
+        return frame_id
 
     def as_dbc_string(self, *,
                       sort_signals:type_sort_signals=SORT_SIGNALS_DEFAULT,
@@ -472,15 +637,45 @@ class Database:
 
         return self._name_to_message[name]
 
-    def get_message_by_frame_id(self, frame_id: int, force_extended_id: bool = False) -> Message:
+    def get_message_by_frame_id(self,
+                                frame_id: int,
+                                force_extended_id: bool = False,
+                                *,
+                                is_extended_frame: Optional[bool] = None) -> Message:
         """Find the message object for given frame id `frame_id`.
+
+        The standard/extended frame type is part of the message
+        identity: a standard frame and an extended frame with the same
+        numeric id are different frames. Pass ``force_extended_id=True``
+        (or an id above ``0x7FF``) to look up an extended frame, or pass
+        ``is_extended_frame`` explicitly when the frame type is known
+        (for example from a log line); the explicit flag wins even for
+        extended ids that are numerically small.
+
+        Only the arbitration id bits selected by the database's
+        ``frame_id_mask`` take part in the comparison, never the frame
+        type.
+
+        Raises :class:`KeyError` when no message of that frame type
+        matches and
+        :class:`~cantools.database.errors.AmbiguousFrameIdError` when a
+        partial mask makes several incompatible definitions match. A
+        frame type without a matching definition never falls back to a
+        message of the other type.
 
         """
 
-        if force_extended_id or frame_id > 0x7FF:
-            frame_id |= 0x80000000
+        arbitration_id, extended = resolve_frame_identity(
+            frame_id,
+            force_extended_id,
+            is_extended_frame=is_extended_frame)
 
-        return self._frame_id_to_message[frame_id & (0x80000000 | self._frame_id_mask)]
+        if not frame_id_is_legal(arbitration_id, extended):
+            raise KeyError(frame_id)
+
+        return self._resolve_frame_identity(
+            (mask_frame_id(arbitration_id, self._frame_id_mask), extended),
+            arbitration_id)
 
     def get_node_by_name(self, name: str) -> Node:
         """Find the node object for given name `name`.
@@ -533,9 +728,9 @@ class Database:
         """
 
         if isinstance(frame_id_or_name, int):
-            if force_extended_id or frame_id_or_name > 0x7FF:
-                frame_id_or_name |= 0x80000000
-            message = self._frame_id_to_message[frame_id_or_name]
+            message = self.get_message_by_frame_id(
+                frame_id_or_name,
+                force_extended_id=force_extended_id)
         elif isinstance(frame_id_or_name, str):
             message = self._name_to_message[frame_id_or_name]
         else:
@@ -584,9 +779,9 @@ class Database:
         """
 
         if isinstance(frame_id_or_name, int):
-            if force_extended_id or frame_id_or_name > 0x7FF:
-                frame_id_or_name |= 0x80000000
-            message = self._frame_id_to_message[frame_id_or_name]
+            message = self.get_message_by_frame_id(
+                frame_id_or_name,
+                force_extended_id=force_extended_id)
         elif isinstance(frame_id_or_name, str):
             message = self._name_to_message[frame_id_or_name]
         else:
@@ -618,14 +813,72 @@ class Database:
         database to refresh the internal lookup tables used when
         encoding and decoding messages.
 
+        The tables are rebuilt from scratch on every call, so appending
+        database content, editing a message and calling this method all
+        follow the same conflict policy. The new tables are assembled in
+        local variables and only installed when every message refreshed
+        successfully: a failure (for example a strict signal check) leaves
+        the previously valid index untouched instead of a half-built one.
+
         """
 
-        self._name_to_message = {}
-        self._frame_id_to_message = {}
+        name_to_message: dict[str, Message] = {}
+        frame_id_to_message: dict[FrameIdentity, Message] = {}
+        ambiguous: dict[FrameIdentity, tuple[Message, ...]] = {}
+        # Identity -> every candidate definition, in load order. Local to
+        # this rebuild, so conflict bookkeeping never grows across
+        # refreshes. Layout signatures are computed only for an identity
+        # that actually has more than one candidate, so an unambiguous
+        # database pays no signature cost at all.
+        candidates_by_identity: dict[FrameIdentity, list[Message]] = {}
 
         for message in self._messages:
             message.refresh(self._strict)
-            self._add_message(message)
+
+            name_to_message[message.name] = message
+
+            if not frame_id_is_legal(message.frame_id,
+                                     message.is_extended_frame):
+                LOGGER.warning(
+                    "Message '%s' has an illegal %s frame id 0x%x and is "
+                    "left out of the frame id index (it is still reachable "
+                    "by name).",
+                    message.name,
+                    'extended' if message.is_extended_frame else 'standard',
+                    message.frame_id)
+                continue
+
+            candidates_by_identity.setdefault(
+                self.frame_identity_of(message), []).append(message)
+
+        signatures_by_object: dict[int, tuple] = {}
+
+        def signature_of(message: Message) -> tuple:
+            signature = signatures_by_object.get(id(message))
+            if signature is None:
+                signature = self._message_layout_signature(message)
+                signatures_by_object[id(message)] = signature
+            return signature
+
+        # Classify each identity from its complete candidate set. This is
+        # one pass over the identities, not a linear scan per lookup.
+        for frame_identity, candidates in candidates_by_identity.items():
+            if len(candidates) == 1:
+                frame_id_to_message[frame_identity] = candidates[0]
+                continue
+
+            if len({signature_of(message)
+                    for message in candidates}) == 1:
+                # Every definition of this identity has the same layout:
+                # the last one wins, matching historical duplicate
+                # handling. They are provably interchangeable.
+                frame_id_to_message[frame_identity] = candidates[-1]
+            else:
+                ambiguous[frame_identity] = tuple(candidates)
+
+        self._name_to_message = name_to_message
+        self._frame_id_to_message = frame_id_to_message
+        self._ambiguous_frame_ids = ambiguous
 
     def __repr__(self) -> str:
         lines = [f"version('{self._version}')", '']

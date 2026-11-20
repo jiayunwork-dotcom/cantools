@@ -1,5 +1,6 @@
-__all__ = ["Bus", "Database", "DecodeError", "EncodeError", "Message",
-           "Node", "Signal", "dump_file", "load", "load_file", "load_string"]
+__all__ = ["AmbiguousFrameIdError", "Bus", "Database", "DecodeError",
+           "EncodeError", "Message", "Node", "Signal", "dump_file", "load",
+           "load_file", "load_string"]
 
 import os
 from contextlib import nullcontext
@@ -15,6 +16,7 @@ from .can.message import Message
 from .can.node import Node
 from .can.signal import Signal
 from .errors import (
+    AmbiguousFrameIdError,
     DecodeError,
     EncodeError,
     Error,

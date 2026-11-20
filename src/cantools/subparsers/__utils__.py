@@ -1,8 +1,8 @@
 import re
 from collections.abc import Iterable, Sequence
-from typing import Union
+from typing import Optional, Union
 
-from cantools.database.errors import DecodeError
+from cantools.database.errors import AmbiguousFrameIdError, DecodeError
 
 from ..database.can.database import Database
 from ..database.can.message import Message
@@ -123,9 +123,22 @@ def format_message_by_frame_id(dbase : Database,
                                decode_containers : bool,
                                *,
                                allow_truncated: bool,
-                               allow_excess: bool) -> str:
+                               allow_excess: bool,
+                               is_extended_frame: Optional[bool] = None) -> str:
+    """Format one log frame for ``cantools decode``.
+
+    ``is_extended_frame`` is the frame type stated by the log. When it is
+    given it decides which message definition may decode the frame, so
+    a standard and an extended frame with the same numeric id never
+    borrow each other's signals. A frame type without a matching
+    definition is reported as unknown instead.
+    """
     try:
-        message = dbase.get_message_by_frame_id(frame_id)
+        message = dbase.get_message_by_frame_id(
+            frame_id,
+            is_extended_frame=is_extended_frame)
+    except AmbiguousFrameIdError as e:
+        return f' {e}'
     except KeyError:
         return f' Unknown frame id {frame_id} (0x{frame_id:x})'
 

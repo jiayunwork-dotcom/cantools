@@ -1,0 +1,10 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU
+
+BO_ 2147483939 Extended: 8 ECU
+ SG_ E : 0|8@1+ (10,0) [0|2550] "" ECU

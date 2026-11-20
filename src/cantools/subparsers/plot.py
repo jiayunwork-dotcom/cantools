@@ -64,6 +64,7 @@ except ImportError:
     plt = None  # type: ignore[assignment,unused-ignore]
 
 from .. import database, errors
+from ..database.errors import AmbiguousFrameIdError
 from ..database.namedsignalvalue import NamedSignalValue
 
 PYPLOT_BASE_COLORS = "bgrcmykwC"
@@ -111,6 +112,12 @@ def _mo_unpack(mo):
     '''extract the data from a re match object'''
     timestamp = mo.group('time')
     frame_id = mo.group('frameid')
+    # candump pads standard ids to three digits and extended ids to eight.
+    # The textual width therefore carries the frame type: an id is an
+    # extended frame only if four or more digits were written. A short
+    # (standard) id is never mistaken for an extended one, and an extended
+    # id below 0x800 is still recognised as extended.
+    is_extended_frame = len(frame_id) > 3
     frame_id = '0' * (8 - len(frame_id)) + frame_id
     frame_id = binascii.unhexlify(frame_id)
     frame_id = struct.unpack('>I', frame_id)[0]
@@ -118,7 +125,7 @@ def _mo_unpack(mo):
     data = data.replace(' ', '')
     data = binascii.unhexlify(data)
 
-    return timestamp, frame_id, data
+    return timestamp, frame_id, data, is_extended_frame
 
 class TimestampParser:
 
@@ -393,14 +400,17 @@ def _do_decode(args):
             mo = re_format.match(line)
 
         if mo:
-            timestamp, frame_id, data = _mo_unpack(mo)
+            timestamp, frame_id, data, is_extended_frame = _mo_unpack(mo)
             timestamp = timestamp_parser.parse_timestamp(timestamp, line_number)
             if args.start is not None and timestamp < args.start:
                 line_number += 1
                 continue
             elif args.stop is not None and timestamp > args.stop:
                 break
-            plotter.add_msg(timestamp, frame_id, data)
+            plotter.add_msg(timestamp,
+                            frame_id,
+                            data,
+                            is_extended_frame=is_extended_frame)
         elif RE_DECODE.match(line):
             continue
         else:
@@ -439,14 +449,23 @@ class Plotter:
 
     # ------- while reading data -------
 
-    def add_msg(self, timestamp, frame_id, data):
+    def add_msg(self, timestamp, frame_id, data, *, is_extended_frame=None):
+        """Decode and record one log frame.
+
+        ``is_extended_frame`` is the frame type read from the log. When
+        present it selects the message definition, so a standard and an
+        extended frame with the same numeric id are never merged into
+        one curve, and a type without a definition stays unknown.
+        """
         try:
-            message = self.dbase.get_message_by_frame_id(frame_id)
+            message = self.dbase.get_message_by_frame_id(
+                frame_id,
+                is_extended_frame=is_extended_frame)
+        except AmbiguousFrameIdError as e:
+            self._unknown_frame(timestamp, frame_id, str(e))
+            return
         except KeyError:
-            if self.show_unknown_frames:
-                self.x_unknown_frames.append(timestamp)
-            if not self.ignore_unknown_frames:
-                print(f'Unknown frame id {frame_id} (0x{frame_id:x})')
+            self._unknown_frame(timestamp, frame_id, None)
             return
 
         try:
@@ -471,6 +490,15 @@ class Plotter:
             self.x_invalid_syntax.append(timestamp)
         if not self.ignore_invalid_syntax:
             print(f"Failed to parse line: {line!r}")
+
+    def _unknown_frame(self, timestamp, frame_id, reason):
+        if self.show_unknown_frames:
+            self.x_unknown_frames.append(timestamp)
+        if not self.ignore_unknown_frames:
+            if reason is not None:
+                print(reason)
+            else:
+                print(f'Unknown frame id {frame_id} (0x{frame_id:x})')
 
     # ------- at end -------
 

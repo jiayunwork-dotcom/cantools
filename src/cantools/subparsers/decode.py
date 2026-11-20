@@ -30,7 +30,8 @@ def _do_decode(args):
                                                args.single_line,
                                                decode_containers,
                                                allow_truncated=allow_truncated,
-                                               allow_excess=allow_excess)
+                                               allow_excess=allow_excess,
+                                               is_extended_frame=frame.is_extended_frame)
 
         print(line)
 
