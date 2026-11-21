@@ -2,6 +2,7 @@
 
 import logging
 from copy import deepcopy
+from fractions import Fraction
 from typing import (
     TYPE_CHECKING,
     Optional,
@@ -25,6 +26,7 @@ from ...typechecking import (
 )
 from ..errors import DecodeError, EncodeError, Error
 from ..namedsignalvalue import NamedSignalValue
+from ..representability import validate_representability
 from ..utils import (
     SORT_SIGNALS_DEFAULT,
     create_encode_decode_formats,
@@ -778,11 +780,14 @@ class Message:
                         f'or equal to {signal.maximum} in message "{self.name}", '
                         f'but got {scaled_value}.')
 
-    def _encode(self, node: Codec, data: SignalMappingType, scaling: bool) -> tuple[int, int, list[Signal]]:
+    def _encode(self, node: Codec, data: SignalMappingType, scaling: bool,
+                representability: Optional["Fraction"] = None
+                ) -> tuple[int, int, list[Signal]]:
         encoded = encode_data(data,
                               node['signals'],
                               node['formats'],
-                              scaling)
+                              scaling,
+                              representability)
         padding_mask = node['formats'].padding_mask
         multiplexers = node['multiplexers']
 
@@ -799,7 +804,7 @@ class Message:
                                   f'but got {mux}') from None
 
             mux_encoded, mux_padding_mask, mux_signals = \
-                self._encode(node, data, scaling)
+                self._encode(node, data, scaling, representability)
             all_signals.extend(mux_signals)
 
             encoded |= mux_encoded
@@ -888,6 +893,7 @@ class Message:
                scaling: bool = True,
                padding: bool = False,
                strict: bool = True,
+               representability: Optional[dict[str, float]] = None,
                ) -> bytes:
 
         """Encode given data as a message of this type.
@@ -912,11 +918,37 @@ class Message:
         ones expected, and their values must be within their allowed ranges,
         or an `EncodeError` exception is raised.
 
+        If `representability` is ``{'max_abs_error': x}`` the shared
+        representability policy is enabled for every numeric signal: the
+        chosen raw code must be legal (inside the bit field, within the
+        declared min/max and not the signal's ``raw_invalid`` sentinel)
+        and reproduce the requested physical value within an absolute
+        error of at most ``x`` in the signal's own physical unit. A zero
+        budget requires an exact grid point. Enumerated signals keep
+        their exact label mapping. The return value stays ``bytes``.
+        This argument is only accepted together with ``scaling=True``
+        and ``strict=True``, and is not available for container
+        messages; other combinations raise an exception. Omitting it
+        preserves the historical behavior.
+
         >>> foo = db.get_message_by_name('Foo')
         >>> foo.encode({'Bar': 1, 'Fum': 5.0})
         b'\\x01\\x45\\x23\\x00\\x11'
 
         """
+
+        if representability is not None:
+            if not scaling or not strict:
+                raise EncodeError(
+                    "representability checks are only available with "
+                    "scaling=True and strict=True")
+            if self.is_container:
+                raise EncodeError(
+                    "representability checks are not supported for "
+                    "container messages")
+            budget = validate_representability(representability)
+        else:
+            budget = None
 
         if self.is_container:
             if strict:
@@ -945,7 +977,8 @@ class Message:
 
         encoded, padding_mask, _ = self._encode(self._codecs,
                                                 cast('SignalMappingType', data),
-                                                scaling)
+                                                scaling,
+                                                budget)
 
         if padding:
             padding_pattern = int.from_bytes([self._unused_bit_pattern] * self._length, "big")

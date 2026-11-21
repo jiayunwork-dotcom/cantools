@@ -4,6 +4,7 @@ import os.path
 import re
 from collections import OrderedDict
 from collections.abc import Sequence
+from fractions import Fraction
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -23,6 +24,7 @@ from ..typechecking import (
 )
 from .errors import DecodeError, EncodeError
 from .namedsignalvalue import NamedSignalValue
+from .representability import quantize_signal_value
 
 if TYPE_CHECKING:
     from ..database import Database
@@ -68,9 +70,16 @@ def start_bit(signal: Union["Data", "Signal"]) -> int:
 def _encode_signal_values(signals: Sequence[Union["Signal", "Data"]],
                           signal_values: SignalMappingType,
                           scaling: bool,
+                          representability: Optional["Fraction"] = None,
                           ) -> dict[str, Union[int, float]]:
     """
     Convert a dictionary of physical signal values into raw ones.
+
+    When `representability` is not ``None`` every numeric signal is
+    quantized through the shared representability policy and the chosen
+    raw code is guaranteed, by exact rational arithmetic, to be a legal
+    code within the requested absolute error budget. Enumerated signals
+    keep their exact label-to-code mapping.
     """
     raw_values = {}
     for signal in signals:
@@ -78,16 +87,32 @@ def _encode_signal_values(signals: Sequence[Union["Signal", "Data"]],
         conversion = signal.conversion
         value = signal_values[name]
 
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float, Fraction)):
             if scaling:
-                raw_values[name] = conversion.numeric_scaled_to_raw(value)
+                if representability is not None:
+                    raw_values[name] = quantize_signal_value(
+                        signal, value, representability)
+                else:
+                    raw_values[name] = conversion.numeric_scaled_to_raw(value)
                 continue
+
+            if representability is not None:
+                # validated by Message.encode()/Database.encode_message()
+                raise EncodeError(
+                    "representability checks require scaling=True")
 
             raw_values[name] = value if conversion.is_float else round(value)
             continue
 
         if isinstance(value, str):
-            raw_values[name] = conversion.choice_to_number(value)
+            try:
+                raw_values[name] = conversion.choice_to_number(value)
+            except KeyError as exc:
+                if representability is not None:
+                    raise EncodeError(
+                        f"Choice '{value}' not found in signal '{name}'.") \
+                        from exc
+                raise
             continue
 
         if isinstance(value, NamedSignalValue):
@@ -111,12 +136,16 @@ def _encode_signal_values(signals: Sequence[Union["Signal", "Data"]],
 def encode_data(signal_values: SignalMappingType,
                 signals: Sequence[Union["Signal", "Data"]],
                 formats: Formats,
-                scaling: bool
+                scaling: bool,
+                representability: Optional["Fraction"] = None
                 ) -> int:
     if len(signals) == 0:
         return 0
 
-    raw_signal_values = _encode_signal_values(signals, signal_values, scaling)
+    raw_signal_values = _encode_signal_values(signals,
+                                              signal_values,
+                                              scaling,
+                                              representability)
     big_packed = formats.big_endian.pack(raw_signal_values)
     little_packed = formats.little_endian.pack(raw_signal_values)
     packed_union = int.from_bytes(big_packed, "big") | int.from_bytes(little_packed, "little")

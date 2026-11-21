@@ -1,5 +1,6 @@
 __all__ = ["Bus", "Database", "DecodeError", "EncodeError", "Message",
-           "Node", "Signal", "dump_file", "load", "load_file", "load_string"]
+           "MigrationError", "MigrationPlan", "Node", "Signal",
+           "dump_file", "load", "load_file", "load_string"]
 
 import os
 from contextlib import nullcontext
@@ -20,6 +21,7 @@ from .errors import (
     Error,
     UnsupportedDatabaseFormatError,
 )
+from .migration import MigrationError, MigrationPlan
 
 
 def _resolve_database_format_and_encoding(database_format,

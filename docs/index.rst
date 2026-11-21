@@ -6,6 +6,8 @@
 .. toctree::
    :maxdepth: 2
 
+   migration
+
 CAN BUS tools
 =============
 
@@ -23,6 +25,12 @@ Functions and classes
 .. autofunction:: cantools.database.load
 
 .. autoclass:: cantools.database.can.Database
+    :members:
+
+.. autoclass:: cantools.database.MigrationPlan
+    :members:
+
+.. autoclass:: cantools.database.MigrationError
     :members:
 
 .. autoclass:: cantools.database.can.Message

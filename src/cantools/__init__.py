@@ -111,5 +111,10 @@ def _main():
     else:
         try:
             args.func(args)
+        except SystemExit:
+            # Subcommands that manage their own error reporting and
+            # exit code (e.g. the migration mode of ``decode``) raise
+            # SystemExit directly; do not re-wrap it.
+            raise
         except BaseException as e:
             sys.exit('error: ' + str(e))

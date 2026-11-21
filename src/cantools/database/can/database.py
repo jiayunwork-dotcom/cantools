@@ -511,6 +511,7 @@ class Database:
                        padding: bool = False,
                        strict: bool = True,
                        force_extended_id: bool = False,
+                       representability: Optional[dict[str, float]] = None,
                        ) -> bytes:
         """Encode given signal data `data` as a message of given frame id or
         name `frame_id_or_name`. For regular Messages, `data` is a
@@ -524,6 +525,11 @@ class Database:
 
         If `strict` is ``True`` all signal values must be within their
         allowed ranges, or an exception is raised.
+
+        If `representability` is ``{'max_abs_error': x}`` the shared
+        representability policy is enabled; see :meth:`Message.encode`
+        for the full description. It is only accepted together with
+        `scaling` and `strict` both set to ``True``.
 
         >>> db.encode_message(158, {'Bar': 1, 'Fum': 5.0})
         b'\\x01\\x45\\x23\\x00\\x11'
@@ -541,7 +547,14 @@ class Database:
         else:
             raise ValueError(f"Invalid frame_id_or_name '{frame_id_or_name}'")
 
-        return message.encode(data, scaling, padding, strict)
+        # Dispatch to the very Message object found in this database, so
+        # the same validation/quantization path (including multiplexer
+        # handling) is always used.
+        return message.encode(data,
+                              scaling,
+                              padding,
+                              strict,
+                              representability=representability)
 
     def decode_message(self,
                        frame_id_or_name: Union[int, str],
@@ -610,6 +623,44 @@ class Database:
                               scaling,
                               allow_truncated=allow_truncated,
                               with_quality=with_quality)
+
+    def compile_migration(self,
+                          target_db: "Database",
+                          mapping: list[dict[str, Any]],
+                          *,
+                          max_abs_error: float = 0.0):
+        """Compile a plan that migrates frames of this (source) database
+        into the layout of `target_db`.
+
+        `mapping` is a JSON-serializable list of message mappings. Each
+        entry has the form::
+
+            {
+                "source": {"frame_id": 0x123,
+                           "is_extended_frame": false},
+                "target": {"frame_id": 0x456,
+                           "is_extended_frame": true},
+                "signals": [
+                    {"source_signal": "OldName",
+                     "target_signal": "NewName"},
+                    ...
+                ]
+            }
+
+        The returned
+        :class:`~cantools.database.migration.MigrationPlan` is reusable
+        and independent of later changes to either database. See the
+        project documentation for the full mapping schema, the
+        quantization policy and the list of error conditions detected
+        at compile time.
+        """
+
+        from ..migration import compile_migration
+
+        return compile_migration(self,
+                                 target_db,
+                                 mapping,
+                                 max_abs_error=max_abs_error)
 
     def refresh(self) -> None:
         """Refresh the internal database state.

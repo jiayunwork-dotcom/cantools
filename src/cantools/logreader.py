@@ -31,7 +31,10 @@ class DataFrame:
                  data: bytes,
                  is_remote_frame: bool,
                  timestamp: TimestampType,
-                 timestamp_format: TimestampFormat):
+                 timestamp_format: TimestampFormat,
+                 is_fd: bool = False,
+                 bitrate_switch: bool = False,
+                 error_state_indicator: bool = False):
         """Constructor for DataFrame
 
         :param channel: A string representation of the channel, eg. 'can0'
@@ -39,6 +42,11 @@ class DataFrame:
         :param timestamp: A timestamp, datetime.datetime if absolute, or
             datetime.timedelta if relative, None if missing
         :param timestamp_format: The format of the timestamp
+        :param is_fd: ``True`` for CAN FD frames, ``False`` for classic CAN.
+        :param bitrate_switch: The BRS flag of a CAN FD frame (only
+            meaningful when `is_fd` is ``True``).
+        :param error_state_indicator: The ESI flag of a CAN FD frame
+            (only meaningful when `is_fd` is ``True``).
         : """
         self.channel = channel
         self.frame_id = frame_id
@@ -47,10 +55,56 @@ class DataFrame:
         self.is_remote_frame = is_remote_frame
         self.timestamp = timestamp
         self.timestamp_format = timestamp_format
+        self.is_fd = is_fd
+        self.bitrate_switch = bitrate_switch
+        self.error_state_indicator = error_state_indicator
 
     def __repr__(self) -> str:
         attrs = ', '.join(f'{a} = {getattr(self, a)!r}' for a in self.__dict__.keys())
         return f'{type(self).__name__}({attrs})'
+
+
+def format_candump_log_line(frame: DataFrame) -> str:
+    """Serialize a :class:`DataFrame` as one ``candump -L`` log line.
+
+    The output uses the same shape the parser accepts, so a migrated
+    log can be read again by ``cantools logreader`` / ``candump -L``:
+
+    * ``(seconds.us) channel ID#payload`` for classic CAN
+    * ``(seconds.us) channel ID##npayload`` for CAN FD, with the flag
+      nibble preserving BRS (bit 0) and ESI (bit 1)
+    * remote requests are rendered as ``...#R``
+
+    The timestamp is written with microsecond precision. Standard ids
+    are rendered without padding while extended ids use eight hex
+    digits, which is how the parser distinguishes the two frame types.
+    """
+
+    timestamp = frame.timestamp
+    if timestamp is None:
+        raise ValueError(
+            "only timestamped frames can be written as candump -L lines")
+    if isinstance(timestamp, datetime.datetime):
+        seconds = timestamp.timestamp()
+    elif isinstance(timestamp, datetime.timedelta):
+        seconds = timestamp.total_seconds()
+    else:
+        raise ValueError(
+            f"unsupported timestamp type {type(timestamp).__name__}")
+
+    width = 8 if frame.is_extended_frame else 3
+    can_id = f'{frame.frame_id:0{width}X}'
+
+    if frame.is_remote_frame:
+        payload = 'R'
+    elif frame.is_fd:
+        flags = (0x1 if frame.bitrate_switch else 0x0) | \
+                (0x2 if frame.error_state_indicator else 0x0)
+        payload = f'#{flags:X}' + frame.data.hex().upper()
+    else:
+        payload = frame.data.hex().upper()
+
+    return f'({seconds:.6f}) {frame.channel} {can_id}#{payload}'
 
 
 class BasePattern:
@@ -143,7 +197,7 @@ class CandumpDefaultLogPattern(CandumpBasePattern):
     # (1579857014.345944) can2 486#82967A6B006B07F8
     # (1613656104.501098) can2 14C##16A0FFE00606E022400000000000000A0FFFF00FFFF25000600000000000000FE
     pattern = re.compile(
-        r'^\s*?\((?P<timestamp>[\d.]+?)\)\s+?(?P<channel>[a-zA-Z0-9]+)\s+?(?P<can_id>[0-9A-F]+?)#(#[0-9A-F])?(?P<can_data>R|([0-9A-Fa-f]{2})*)(\s+[RT])?$')
+        r'^\s*?\((?P<timestamp>[\d.]+?)\)\s+?(?P<channel>[a-zA-Z0-9]+)\s+?(?P<can_id>[0-9A-F]+?)#(?:#(?P<fd_flags>[0-9A-Fa-f])(?P<can_data>[0-9A-Fa-f]*)|(?P<can_data_classic>R|[0-9A-Fa-f]*))(\s+[RT])?$')
 
     def __init__(self, tz: TimezoneType) -> None:
         if tz == TZ_LOCAL:
@@ -152,6 +206,52 @@ class CandumpDefaultLogPattern(CandumpBasePattern):
         else:
             self.convert_to_timezone_aware_object = False
         self.tz = tz
+
+    def unpack(self, match_object: re.Match[str]) -> Optional[DataFrame]:
+        # The default candump log pattern needs its own unpack() to keep
+        # the CAN FD marker ('##flags') from being treated as payload.
+        channel = match_object.group('channel')
+        frame_id = int(match_object.group('can_id'), 16)
+        is_extended_frame = len(match_object.group('can_id')) > 3
+        mo_groups = match_object.groupdict()
+        raw_data = (mo_groups.get('can_data')
+                    if mo_groups.get('can_data') is not None
+                    else mo_groups.get('can_data_classic'))
+        if raw_data == 'R':
+            is_remote_frame = True
+            data = bytes(0)
+        else:
+            is_remote_frame = False
+            # A payload must consist of whole bytes (pairs of hex).
+            if len(raw_data) % 2:
+                return None
+            data = binascii.unhexlify(raw_data)
+
+        # A '##n' marker makes the frame CAN FD; the single flag
+        # nibble carries BRS (bit 0) and ESI (bit 1).
+        fd_flags = match_object.group('fd_flags')
+        is_fd = fd_flags is not None
+        if is_fd:
+            flags = int(fd_flags, 16)
+            # can-utils: bit 0 is BRS, bit 1 is ESI.
+            bitrate_switch = bool(flags & 0x1)
+            error_state_indicator = bool(flags & 0x2)
+        else:
+            bitrate_switch = False
+            error_state_indicator = False
+
+        timestamp, timestamp_format = self.parse_timestamp(match_object)
+
+        return DataFrame(channel=channel,
+                         frame_id=frame_id,
+                         is_extended_frame=is_extended_frame,
+                         data=data,
+                         is_remote_frame=is_remote_frame,
+                         timestamp=timestamp,
+                         timestamp_format=timestamp_format,
+                         is_fd=is_fd,
+                         bitrate_switch=bitrate_switch,
+                         error_state_indicator=error_state_indicator)
 
     def parse_timestamp(self, match_object: re.Match[str]) -> tuple[TimestampType, TimestampFormat]:
         timestamp = datetime.datetime.fromtimestamp(float(match_object.group('timestamp')), self.tz)
