@@ -30,7 +30,8 @@ def _do_decode(args):
                                                args.single_line,
                                                decode_containers,
                                                allow_truncated=allow_truncated,
-                                               allow_excess=allow_excess)
+                                               allow_excess=allow_excess,
+                                               check_e2e=args.e2e)
 
         print(line)
 
@@ -70,6 +71,13 @@ def add_subparser(subparsers):
         help=('Only compare selected frame id bits to find the message in the '
               'database. By default the candump and database frame ids must '
               'be equal for a match.'))
+    decode_parser.add_argument(
+        '--e2e',
+        action='store_true',
+        help=('Check the AUTOSAR end-to-end protection (CRC and sequence '
+              'counter) of E2E protected messages and append the integrity '
+              'status to every decoded frame. The check is stateful, i.e., '
+              'frames of the same message are compared in arrival order.'))
     decode_parser.add_argument(
         'database',
         help='Database file.')

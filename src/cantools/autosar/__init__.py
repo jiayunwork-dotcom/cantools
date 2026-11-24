@@ -1,5 +1,8 @@
 # a collection of AUTOSAR specific functionality
 __all__ = [
+   "E2EProtection",
+   "E2EResult",
+   "E2EStatus",
    "SecOCError",
    "apply_authenticator",
    "apply_profile2_crc",
@@ -12,6 +15,7 @@ __all__ = [
    "verify_authenticator",
 ]
 
+from .e2e_protection import E2EProtection, E2EResult, E2EStatus
 from .end_to_end import (
    apply_profile2_crc,
    apply_profile5_crc,

@@ -119,6 +119,26 @@ Alternatively, the decoded message can be printed on a single line:
      vcan0  1F0   [8]  80 4A 0F 00 00 00 00 00 :: ExampleMessage(Enable: 'Enabled' -, AverageRadius: 0.0 m, Temperature: 255.92 degK)
      vcan0  1F0   [8]  80 4A 0F 00 00 00 00 00 :: ExampleMessage(Enable: 'Enabled' -, AverageRadius: 0.0 m, Temperature: 255.92 degK)
 
+For databases with AUTOSAR end-to-end (E2E) protection properties,
+``--e2e`` appends the integrity status of every E2E protected frame.
+The check is stateful: frames of the same message are compared in
+arrival order.
+
+.. code-block:: text
+
+   $ candump vcan0 | python3 -m cantools decode --single-line --e2e tests/files/arxml/system-4.2.arxml
+     vcan0  005   [9]  D7 0E 11 22 33 00 00 00 00 :: Message1(message1_SeqCounter: 3799, message1_CRC: 8721, signal6: 0.1 wp, signal1: 20 m, signal5: 0.0) [E2E: OK]
+     vcan0  005   [9]  CC 09 11 22 33 00 00 00 00 :: Message1(message1_SeqCounter: 2508, message1_CRC: 8721, signal6: 0.1 wp, signal1: 20 m, signal5: 0.0) [E2E: SEQUENCE_JUMP]
+     vcan0  005   [1]  30 :: Wrong data size: 1 instead of 9 bytes [E2E: FRAME_TOO_SHORT]
+
+The status is one of ``OK``, ``CRC_ERROR``, ``REPEATED``,
+``SEQUENCE_JUMP`` and ``FRAME_TOO_SHORT``. The same stateful check is
+available from Python via ``message.check_e2e(data)``, which returns an
+``E2EResult``. SecOC frames only take their protected prefix into
+account (the security trailer neither enters the CRC nor the frame
+length), and contained messages of a container frame are checked with
+their own E2E properties.
+
 The plot subcommand
 ^^^^^^^^^^^^^^^^^^^
 

@@ -39,6 +39,7 @@ from .signal import Signal
 from .signal_group import SignalGroup
 
 if TYPE_CHECKING:
+    from ...autosar.e2e_protection import E2EProtection, E2EResult
     from .formats.arxml import AutosarMessageSpecifics
     from .formats.dbc import DbcSpecifics
 
@@ -137,6 +138,15 @@ class Message:
         self._signal_tree: Optional[list[Union[str, list[str]]]] = None
         self._strict = strict
         self._protocol = protocol
+
+        # stateful E2E protection checker; created lazily by
+        # get_e2e_protection()/check_e2e()
+        self._e2e_protection: Optional['E2EProtection'] = None
+
+        # E2E results of the most recent decode_container() call with
+        # check_e2e=True
+        self._contained_e2e_results: list[Optional['E2EResult']] = []
+
         self.refresh()
 
     def _create_codec(self,
@@ -1061,6 +1071,7 @@ class Message:
                decode_containers: bool = False,
                allow_truncated: bool = False,
                allow_excess: bool = True,
+               check_e2e: bool = False,
                ) \
                -> DecodeResultType:
         """Decode given data as a message of this type.
@@ -1094,6 +1105,13 @@ class Message:
         If `allow_excess` is ``True``, data that is are longer than
         the expected message length is decoded, else a `ValueError` is
         raised if such data is encountered.
+
+        If `check_e2e` is ``True`` and the message (or, in case of a
+        container frame, one of its contained messages) is E2E
+        protected, the AUTOSAR end-to-end protection is checked using
+        the stateful per-message E2E checker. For container frames the
+        per-contained-message results are available via
+        :meth:`get_contained_e2e_results`.
         """
 
         if decode_containers and self.is_container:
@@ -1101,7 +1119,8 @@ class Message:
                                          decode_choices,
                                          scaling,
                                          allow_truncated,
-                                         allow_excess)
+                                         allow_excess,
+                                         check_e2e=check_e2e)
 
         return self.decode_simple(data,
                                   decode_choices,
@@ -1140,13 +1159,18 @@ class Message:
                          decode_choices: bool = True,
                          scaling: bool = True,
                          allow_truncated: bool = False,
-                         allow_excess: bool = True) \
+                         allow_excess: bool = True,
+                         check_e2e: bool = False) \
                          -> ContainerDecodeResultType:
         """Decode given data as a container message.
 
         This method is identical to ``decode()`` except that the
         message **must** be a container. If the message is not a
         container, an exception is raised.
+
+        If `check_e2e` is ``True``, every E2E protected contained
+        message is checked using its stateful E2E checker. The latest
+        results are available via :meth:`get_contained_e2e_results`.
         """
 
         if not self.is_container:
@@ -1155,8 +1179,16 @@ class Message:
         unpacked = self.unpack_container(data, allow_truncated)
 
         result: ContainerDecodeResultListType = []
+        e2e_results: list[Optional['E2EResult']] = []
 
         for contained_message, contained_data in unpacked:
+            e2e_result = None
+            if check_e2e \
+                    and isinstance(contained_message, Message) \
+                    and contained_message.is_e2e_protected():
+                e2e_result = contained_message.check_e2e(contained_data)
+            e2e_results.append(e2e_result)
+
             if not isinstance(contained_message, Message):
                 result.append((contained_message, bytes(contained_data)))
                 continue
@@ -1174,7 +1206,62 @@ class Message:
 
             result.append((contained_message, decoded)) # type: ignore
 
+        if check_e2e:
+            self._contained_e2e_results = e2e_results
         return result
+
+    def get_contained_e2e_results(self) \
+        -> list[Optional['E2EResult']]:
+        """Return the E2E results of the most recent
+        :meth:`decode_container` call with E2E checking enabled.
+
+        The list parallels the decoded container entries: entries of
+        messages without E2E protection are ``None``. Before any such
+        decode, an empty list is returned.
+        """
+
+        return list(self._contained_e2e_results)
+
+    def is_e2e_protected(self) -> bool:
+        """Returns ``True`` if the message exhibits AUTOSAR end-to-end
+        protection properties, ``False`` otherwise.
+        """
+
+        return self._autosar is not None and self._autosar.e2e is not None
+
+    def get_e2e_protection(self) -> 'E2EProtection':
+        """Return the stateful E2E protection checker of this message.
+
+        The checker is created lazily and shared by all calls, i.e., it
+        keeps its sequence counter baseline across frames. Frames of the
+        same message must be passed in arrival order. A
+        :class:`ValueError` is raised if the message is not E2E
+        protected.
+        """
+
+        if self._e2e_protection is None:
+            if not self.is_e2e_protected():
+                raise ValueError(
+                    f'Message "{self.name}" is not E2E protected')
+
+            from ...autosar.e2e_protection import E2EProtection
+            self._e2e_protection = E2EProtection(self)
+
+        return self._e2e_protection
+
+    def check_e2e(self, data: bytes) -> 'E2EResult':
+        """Check the E2E integrity of a single frame.
+
+        This combines the CRC check with the stateful evaluation of the
+        sequence counter and returns an
+        :class:`~cantools.autosar.E2EResult`. The check works on the
+        raw frame data independently of :meth:`decode`, so it can also
+        be used on frames that are too short to be decoded. A
+        :class:`ValueError` is raised if the message is not E2E
+        protected.
+        """
+
+        return self.get_e2e_protection().check(data)
 
     def get_contained_message_by_header_id(self, header_id: int) \
         -> Optional['Message']:

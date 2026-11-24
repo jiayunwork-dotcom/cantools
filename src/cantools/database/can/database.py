@@ -551,6 +551,7 @@ class Database:
                        decode_containers: bool = False,
                        allow_truncated:  bool = False,
                        force_extended_id: bool = False,
+                       check_e2e: bool = False,
                        ) \
         -> DecodeResultType:
 
@@ -592,7 +593,8 @@ class Database:
                                       decode_choices,
                                       scaling,
                                       decode_containers=True,
-                                      allow_truncated=allow_truncated)
+                                      allow_truncated=allow_truncated,
+                                      check_e2e=check_e2e)
             else:
                 raise DecodeError(f'Message "{message.name}" is a container '
                                   f'message, but decoding such messages has '
@@ -601,7 +603,8 @@ class Database:
         return message.decode(data,
                               decode_choices,
                               scaling,
-                              allow_truncated=allow_truncated)
+                              allow_truncated=allow_truncated,
+                              check_e2e=check_e2e)
 
     def refresh(self) -> None:
         """Refresh the internal database state.

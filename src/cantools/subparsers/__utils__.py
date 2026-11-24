@@ -4,6 +4,7 @@ from typing import Union
 
 from cantools.database.errors import DecodeError
 
+from ..autosar.e2e_protection import E2EResult
 from ..database.can.database import Database
 from ..database.can.message import Message
 from ..database.namedsignalvalue import NamedSignalValue
@@ -62,20 +63,28 @@ def _format_message_multi_line(name: str,
     return MULTI_LINE_FMT.format(message=name,
                                  signals=',\n'.join(indented_signals))
 
+def _format_e2e_suffix(e2e_result: Union[E2EResult, None]) -> str:
+    if e2e_result is None:
+        return ''
+
+    return f' [E2E: {e2e_result.status}]'
+
+
 def _format_container_single_line(message : Message,
                                   unpacked_data : ContainerUnpackResultType,
-                                  decoded_data : ContainerDecodeResultType) \
+                                  decoded_data : ContainerDecodeResultType,
+                                  e2e_results: Sequence[Union[E2EResult, None]]) \
                                   -> str:
     contained_list = []
     for i, (cm, signals) in enumerate(decoded_data):
+        e2e_suffix = _format_e2e_suffix(e2e_results[i])
         if isinstance(cm, Message):
             if isinstance(signals, bytes):
                 formatted_cm = f'{cm.name}: Undecodable data: {signals.hex(" ")}'
-                contained_list.append(formatted_cm)
             else:
                 formatted_cm_signals = format_signals(cm, signals)
                 formatted_cm = _format_message_single_line(cm.name, formatted_cm_signals)
-            contained_list.append(formatted_cm)
+            contained_list.append(formatted_cm + e2e_suffix)
         else:
             header_id = cm
             data = unpacked_data[i][1]
@@ -88,13 +97,16 @@ def _format_container_single_line(message : Message,
 
 def _format_container_multi_line(message : Message,
                                  unpacked_data : ContainerUnpackResultType,
-                                 decoded_data : ContainerDecodeResultType) -> str:
+                                 decoded_data : ContainerDecodeResultType,
+                                 e2e_results: Sequence[Union[E2EResult, None]]) -> str:
     contained_list = []
     for i, (cm, signals) in enumerate(decoded_data):
+        e2e_suffix = _format_e2e_suffix(e2e_results[i])
         if isinstance(cm, Message):
             if isinstance(signals, bytes):
                 formatted_cm = f'    {cm.header_id:06x}##{signals.hex()} ::\n'
                 formatted_cm += f'    {cm.name}: Undecodable data'
+                formatted_cm += e2e_suffix
                 contained_list.append(formatted_cm)
             else:
                 formatted_cm_signals = format_signals(cm, signals)
@@ -102,6 +114,8 @@ def _format_container_multi_line(message : Message,
                 formatted_cm += f'{bytes(unpacked_data[i][1]).hex()} ::'
                 formatted_cm += _format_message_multi_line(cm.name, formatted_cm_signals)
                 formatted_cm = formatted_cm.replace('\n', '\n    ')
+                if e2e_suffix:
+                    formatted_cm += f' {e2e_suffix.strip()}'
                 contained_list.append('    '+formatted_cm.strip())
         else:
             header_id = cm
@@ -123,7 +137,8 @@ def format_message_by_frame_id(dbase : Database,
                                decode_containers : bool,
                                *,
                                allow_truncated: bool,
-                               allow_excess: bool) -> str:
+                               allow_excess: bool,
+                               check_e2e: bool = False) -> str:
     try:
         message = dbase.get_message_by_frame_id(frame_id)
     except KeyError:
@@ -136,9 +151,17 @@ def format_message_by_frame_id(dbase : Database,
                                             decode_choices,
                                             single_line,
                                             allow_truncated=allow_truncated,
-                                            allow_excess=allow_excess)
+                                            allow_excess=allow_excess,
+                                            check_e2e=check_e2e)
         else:
             return f' Frame 0x{frame_id:x} is a container message'
+
+    e2e_result = None
+    if check_e2e and message.is_e2e_protected():
+        # The E2E check works on the raw frame data and never raises,
+        # so it also produces a status for frames that are too short to
+        # be decoded.
+        e2e_result = message.check_e2e(data)
 
     try:
         decoded_signals = message.decode_simple(data,
@@ -146,9 +169,12 @@ def format_message_by_frame_id(dbase : Database,
                                         allow_truncated=allow_truncated,
                                         allow_excess=allow_excess)
 
-        return format_message(message, decoded_signals, single_line)
+        return format_message(message,
+                              decoded_signals,
+                              single_line,
+                              e2e_result=e2e_result)
     except DecodeError as e:
-        return f' {e}'
+        return f' {e}' + _format_e2e_suffix(e2e_result)
 
 def format_container_message(message : Message,
                              data : bytes,
@@ -156,7 +182,8 @@ def format_container_message(message : Message,
                              single_line : bool,
                              *,
                              allow_truncated : bool,
-                             allow_excess: bool) -> str:
+                             allow_excess: bool,
+                             check_e2e: bool = False) -> str:
     try:
         unpacked_message = message.unpack_container(data,
                                                     allow_truncated=allow_truncated)
@@ -164,7 +191,9 @@ def format_container_message(message : Message,
                                                    decode_choices=True,
                                                    scaling=True,
                                                    allow_truncated=allow_truncated,
-                                                   allow_excess=allow_excess)
+                                                   allow_excess=allow_excess,
+                                                   check_e2e=check_e2e)
+        e2e_results = message.get_contained_e2e_results()
 
     except DecodeError as e:
         return f' {e}'
@@ -172,22 +201,28 @@ def format_container_message(message : Message,
     if single_line:
         return _format_container_single_line(message,
                                              unpacked_message,
-                                             decoded_message)
+                                             decoded_message,
+                                             e2e_results)
     else:
         return _format_container_multi_line(message,
                                             unpacked_message,
-                                            decoded_message)
+                                            decoded_message,
+                                            e2e_results)
 
 
 def format_message(message : Message,
                    decoded_signals : SignalDictType,
-                   single_line : bool) -> str:
+                   single_line : bool,
+                   e2e_result: Union[E2EResult, None] = None) -> str:
     formatted_signals = format_signals(message, decoded_signals)
+    e2e_suffix = _format_e2e_suffix(e2e_result)
 
     if single_line:
-        return _format_message_single_line(message.name, formatted_signals)
+        return _format_message_single_line(message.name, formatted_signals) \
+            + e2e_suffix
     else:
-        return _format_message_multi_line(message.name, formatted_signals)
+        return _format_message_multi_line(message.name, formatted_signals) \
+            + e2e_suffix
 
 def format_multiplexed_name(message : Message,
                             decoded_signals : SignalDictType) -> str:
